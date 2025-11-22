@@ -3,7 +3,13 @@ export interface User {
   username: string
   email: string
   is_online: boolean
+  profile_picture?: string
+  status_message?: string
+  bio?: string
+  last_seen?: string
   created_at: string
+  unreadCount?: number
+  isMuted?: boolean
 }
 
 export interface Message {

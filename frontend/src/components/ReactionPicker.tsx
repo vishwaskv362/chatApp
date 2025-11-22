@@ -32,9 +32,9 @@ export default function ReactionPicker({ onReactionSelect, show, onClose }: Reac
   return (
     <div
       ref={pickerRef}
-      className="absolute bottom-full mb-2 bg-white rounded-lg shadow-xl border border-gray-200 p-2 z-50"
+      className="bg-white rounded-lg shadow-xl border border-gray-200 p-1.5 z-50"
     >
-      <div className="flex space-x-1">
+      <div className="flex space-x-0.5">
         {QUICK_REACTIONS.map((emoji) => (
           <button
             key={emoji}
@@ -42,7 +42,7 @@ export default function ReactionPicker({ onReactionSelect, show, onClose }: Reac
               onReactionSelect(emoji)
               onClose()
             }}
-            className="text-2xl hover:bg-gray-100 rounded p-2 transition transform hover:scale-125"
+            className="text-xl hover:bg-gray-100 rounded p-1.5 transition transform hover:scale-125"
             title={`React with ${emoji}`}
           >
             {emoji}

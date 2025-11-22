@@ -12,5 +12,8 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     is_online = Column(Boolean, default=False)
+    profile_picture = Column(String, nullable=True)
+    status_message = Column(String, nullable=True)
+    bio = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen = Column(DateTime(timezone=True), onupdate=func.now())

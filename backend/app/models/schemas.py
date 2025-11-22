@@ -19,10 +19,19 @@ class UserResponse(BaseModel):
     username: str
     email: str
     is_online: bool
+    profile_picture: Optional[str] = None
+    status_message: Optional[str] = None
+    bio: Optional[str] = None
+    last_seen: Optional[datetime] = None
     created_at: datetime
     
     class Config:
         from_attributes = True
+
+
+class ProfileUpdate(BaseModel):
+    status_message: Optional[str] = None
+    bio: Optional[str] = None
 
 
 class Token(BaseModel):

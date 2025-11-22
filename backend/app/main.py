@@ -1,9 +1,11 @@
 from fastapi import FastAPI, Depends, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from app.database import engine, Base, get_db
-from app.routes import auth, users, messages
+from app.routes import auth, users, messages, profile
 from app.websocket.connection import websocket_endpoint
+from pathlib import Path
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -24,10 +26,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Create uploads directory
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Mount static files for serving uploaded images
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
 # Include routers
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(messages.router)
+app.include_router(profile.router)
 
 # WebSocket endpoint
 @app.websocket("/ws")

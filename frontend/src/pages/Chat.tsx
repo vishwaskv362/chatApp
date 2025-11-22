@@ -5,8 +5,11 @@ import { useChatStore } from '../store/chatStore'
 import { useThemeStore } from '../store/themeStore'
 import { authAPI, usersAPI, messagesAPI } from '../services/api'
 import { wsService } from '../services/websocket'
+import { notificationService } from '../services/notification'
 import EmojiPicker from '../components/EmojiPicker'
 import ReactionPicker from '../components/ReactionPicker'
+import ProfilePictureUpload from '../components/ProfilePictureUpload'
+import ProfileSettingsModal from '../components/ProfileSettingsModal'
 import type { User, Message, WebSocketMessage } from '../types'
 
 export default function Chat() {
@@ -26,11 +29,18 @@ export default function Chat() {
     setTyping,
     markMessageAsRead,
     updateMessageReactions,
+    incrementUnreadCount,
+    resetUnreadCount,
+    isMuted,
+    toggleMute,
   } = useChatStore()
 
   const [messageInput, setMessageInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [showReactionPicker, setShowReactionPicker] = useState<string | null>(null)
+  const [showProfileUpload, setShowProfileUpload] = useState(false)
+  const [showProfileSettings, setShowProfileSettings] = useState(false)
+  const [lastMessages, setLastMessages] = useState<Record<number, Message>>({})
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messageInputRef = useRef<HTMLInputElement>(null)
   const typingTimeoutRef = useRef<NodeJS.Timeout>()
@@ -90,10 +100,29 @@ export default function Chat() {
     try {
       const allUsers = await usersAPI.getAllUsers()
       setUsers(allUsers)
+      // Load last message for each user
+      await loadLastMessages(allUsers)
     } catch (error) {
       console.error('Failed to load users:', error)
       throw error // Re-throw to handle in initializeChat
     }
+  }
+
+  const loadLastMessages = async (userList: typeof users) => {
+    const lastMsgs: Record<number, Message> = {}
+    for (const u of userList) {
+      if (u.id !== user?.id) {
+        try {
+          const history = await messagesAPI.getHistory(u.id)
+          if (history.length > 0) {
+            lastMsgs[u.id] = history[history.length - 1]
+          }
+        } catch (error) {
+          console.error(`Failed to load last message for user ${u.id}:`, error)
+        }
+      }
+    }
+    setLastMessages(lastMsgs)
   }
 
   const loadMessageHistory = async (userId: number) => {
@@ -138,7 +167,7 @@ export default function Chat() {
         })
         
         if (isMessageForCurrentChat) {
-          addMessage({
+          const newMsg = {
             id: message.id!,
             sender_id: message.sender_id!,
             receiver_id: message.receiver_id!,
@@ -146,11 +175,52 @@ export default function Chat() {
             timestamp: message.timestamp!,
             is_read: message.is_read || false,
             sender_username: message.sender_username,
-          })
+          }
+          addMessage(newMsg)
 
           // Send read receipt if we received a message (not sent by us)
           if (message.receiver_id === user?.id && message.sender_id !== user?.id) {
             wsService.sendReadReceipt(message.id!)
+          }
+        }
+        
+        // Update last message for this conversation
+        const otherUserId = message.sender_id === user?.id ? message.receiver_id : message.sender_id
+        if (otherUserId) {
+          setLastMessages(prev => ({
+            ...prev,
+            [otherUserId]: {
+              id: message.id!,
+              sender_id: message.sender_id!,
+              receiver_id: message.receiver_id!,
+              content: message.content!,
+              timestamp: message.timestamp!,
+              is_read: message.is_read || false,
+              sender_username: message.sender_username,
+            }
+          }))
+
+          // Handle notifications for incoming messages (not sent by current user)
+          if (message.receiver_id === user?.id) {
+            const isChatMuted = isMuted(otherUserId)
+            
+            // Show notification and play sound if not from current chat and not muted
+            if (!isMessageForCurrentChat && !isChatMuted) {
+              const senderUser = users.find(u => u.id === otherUserId)
+              notificationService.showNotification(
+                message.sender_username || senderUser?.username || 'User',
+                {
+                  body: message.content!,
+                  icon: getProfilePictureUrl(senderUser?.profile_picture)
+                }
+              )
+              notificationService.playSound()
+            }
+
+            // Increment unread count if not viewing this chat
+            if (!isMessageForCurrentChat) {
+              incrementUnreadCount(otherUserId)
+            }
           }
         }
         break
@@ -158,7 +228,7 @@ export default function Chat() {
       case 'message_sent':
         // Confirmation that our message was sent - add to UI
         if (message.sender_id === user?.id && message.receiver_id === selectedUser?.id) {
-          addMessage({
+          const sentMsg = {
             id: message.id!,
             sender_id: message.sender_id!,
             receiver_id: message.receiver_id!,
@@ -166,7 +236,14 @@ export default function Chat() {
             timestamp: message.timestamp!,
             is_read: message.is_read || false,
             sender_username: message.sender_username,
-          })
+          }
+          addMessage(sentMsg)
+          
+          // Update last message
+          setLastMessages(prev => ({
+            ...prev,
+            [message.receiver_id!]: sentMsg
+          }))
         }
         break
 
@@ -243,7 +320,29 @@ export default function Chat() {
 
   const formatTime = (timestamp: string) => {
     const date = new Date(timestamp)
-    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    
+    // If today, show time
+    if (date.toDateString() === now.toDateString()) {
+      return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+    }
+    
+    // If yesterday
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    if (date.toDateString() === yesterday.toDateString()) {
+      return 'Yesterday'
+    }
+    
+    // If within a week, show day name
+    if (diffMins < 7 * 24 * 60) {
+      return date.toLocaleDateString('en-US', { weekday: 'short' })
+    }
+    
+    // Otherwise show date
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   }
 
   const handleEmojiSelect = (emoji: string) => {
@@ -254,6 +353,43 @@ export default function Chat() {
   const handleReaction = (messageId: string, emoji: string) => {
     wsService.sendReaction(messageId, emoji)
     setShowReactionPicker(null)
+  }
+
+  const handleProfilePictureUpdate = async (pictureUrl: string) => {
+    if (user) {
+      const updatedUser = { ...user, profile_picture: pictureUrl }
+      updateUser(updatedUser)
+      // Reload users list to update display
+      await loadUsers()
+    }
+  }
+
+  const handleProfileUpdate = (statusMessage: string, bio: string) => {
+    if (user) {
+      const updatedUser = { ...user, status_message: statusMessage, bio: bio }
+      updateUser(updatedUser)
+    }
+  }
+
+  const getProfilePictureUrl = (picture?: string) => {
+    if (!picture) return null
+    return `http://localhost:8000/uploads/${picture}`
+  }
+
+  const formatLastSeen = (lastSeen?: string) => {
+    if (!lastSeen) return 'Never'
+    const date = new Date(lastSeen)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    
+    if (diffMins < 1) return 'Just now'
+    if (diffMins < 60) return `${diffMins}m ago`
+    const diffHours = Math.floor(diffMins / 60)
+    if (diffHours < 24) return `${diffHours}h ago`
+    const diffDays = Math.floor(diffHours / 24)
+    if (diffDays < 7) return `${diffDays}d ago`
+    return date.toLocaleDateString()
   }
 
   if (loading) {
@@ -270,27 +406,70 @@ export default function Chat() {
       <div className={`w-80 ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} border-r flex flex-col`}>
         {/* Header */}
         <div className="p-4 border-b border-gray-700 bg-gradient-to-r from-blue-600 to-purple-600">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold text-white">{user?.username}</h2>
-              <p className="text-sm text-blue-100">Online</p>
-            </div>
-            <div className="flex items-center space-x-2">
-              {/* Dark Mode Toggle */}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center space-x-3">
+              {/* Profile Picture */}
               <button
-                onClick={toggleTheme}
-                className="p-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition"
-                title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                onClick={() => setShowProfileUpload(true)}
+                className="relative group"
+                title="Click to change profile picture"
               >
-                {isDarkMode ? '☀️' : '🌙'}
+                {getProfilePictureUrl(user?.profile_picture) ? (
+                  <img
+                    src={getProfilePictureUrl(user?.profile_picture) || ''}
+                    alt={user?.username}
+                    className="w-14 h-14 rounded-full object-cover border-2 border-white group-hover:border-blue-300 transition"
+                  />
+                ) : (
+                  <div className="w-14 h-14 bg-white rounded-full flex items-center justify-center text-blue-600 font-bold text-xl group-hover:bg-blue-50 transition">
+                    {user?.username[0].toUpperCase()}
+                  </div>
+                )}
+                <div className="absolute inset-0 bg-black bg-opacity-50 rounded-full opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
+                  <span className="text-white text-xs">📷</span>
+                </div>
               </button>
-              <button
-                onClick={handleLogout}
-                className="px-3 py-1 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition text-sm font-medium"
-              >
-                Logout
-              </button>
+              <div className="flex-1">
+                <h2 className="text-xl font-bold text-white">{user?.username}</h2>
+                <p className="text-sm text-blue-100">
+                  {user?.status_message || 'Online'}
+                </p>
+              </div>
             </div>
+          </div>
+          <div className="flex items-center space-x-2">
+            {/* Profile Settings */}
+            <button
+              onClick={() => setShowProfileSettings(true)}
+              className="p-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition flex-1"
+              title="Profile Settings"
+            >
+              ⚙️
+            </button>
+            {/* Dark Mode Toggle */}
+            <button
+              onClick={toggleTheme}
+              className="p-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition flex-1"
+              title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            >
+              {isDarkMode ? '☀️' : '🌙'}
+            </button>
+            {/* Notification Permission */}
+            {Notification.permission === 'default' && (
+              <button
+                onClick={() => notificationService.requestPermission()}
+                className="p-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition flex-1"
+                title="Enable desktop notifications"
+              >
+                🔔
+              </button>
+            )}
+            <button
+              onClick={handleLogout}
+              className="px-3 py-2 bg-white text-blue-600 rounded-lg hover:bg-blue-50 transition text-sm font-medium flex-1"
+            >
+              Logout
+            </button>
           </div>
         </div>
 
@@ -306,7 +485,10 @@ export default function Chat() {
               users.map((u) => (
                 <button
                   key={u.id}
-                  onClick={() => setSelectedUser(u)}
+                  onClick={() => {
+                    setSelectedUser(u)
+                    resetUnreadCount(u.id)
+                  }}
                   className={`w-full p-3 flex items-center space-x-3 rounded-lg transition ${
                     selectedUser?.id === u.id
                       ? isDarkMode 
@@ -318,19 +500,62 @@ export default function Chat() {
                   }`}
                 >
                   <div className="relative">
-                    <div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center text-white font-bold text-lg">
-                      {u.username[0].toUpperCase()}
-                    </div>
+                    {getProfilePictureUrl(u.profile_picture) ? (
+                      <img
+                        src={getProfilePictureUrl(u.profile_picture) || ''}
+                        alt={u.username}
+                        className="w-12 h-12 rounded-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center text-white font-bold text-lg">
+                        {u.username[0].toUpperCase()}
+                      </div>
+                    )}
                     <div
                       className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 ${isDarkMode ? 'border-gray-800' : 'border-white'} ${
                         u.is_online ? 'bg-green-500' : 'bg-gray-400'
                       }`}
                     />
                   </div>
-                  <div className="flex-1 text-left">
-                    <p className={`font-medium ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>{u.username}</p>
-                    <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                      {u.is_online ? 'Online' : 'Offline'}
+                  <div className="flex-1 text-left min-w-0">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <p className={`font-medium ${isDarkMode ? 'text-gray-100' : 'text-gray-900'} truncate`}>
+                          {u.username}
+                        </p>
+                        {isMuted(u.id) && (
+                          <span className="text-xs" title="Muted">🔕</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 ml-2 flex-shrink-0">
+                        {u.unreadCount && u.unreadCount > 0 && (
+                          <span className="bg-red-500 text-white text-xs font-bold px-2 py-0.5 rounded-full min-w-[20px] text-center">
+                            {u.unreadCount > 99 ? '99+' : u.unreadCount}
+                          </span>
+                        )}
+                        {lastMessages[u.id] && (
+                          <span className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                            {formatTime(lastMessages[u.id].timestamp)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <p 
+                      className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'} truncate`}
+                      title={u.status_message}
+                    >
+                      {lastMessages[u.id] ? (
+                        <>
+                          {lastMessages[u.id].sender_id === user?.id && (
+                            <span className={isDarkMode ? 'text-gray-500' : 'text-gray-400'}>You: </span>
+                          )}
+                          {lastMessages[u.id].content}
+                        </>
+                      ) : (
+                        <span className={isDarkMode ? 'text-gray-500' : 'text-gray-400'}>
+                          {u.status_message || 'No messages yet'}
+                        </span>
+                      )}
                     </p>
                   </div>
                 </button>
@@ -347,21 +572,47 @@ export default function Chat() {
             {/* Chat Header */}
             <div className={`p-4 ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'} border-b flex items-center space-x-3`}>
               <div className="relative">
-                <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center text-white font-bold">
-                  {selectedUser.username[0].toUpperCase()}
-                </div>
+                {getProfilePictureUrl(selectedUser.profile_picture) ? (
+                  <img
+                    src={getProfilePictureUrl(selectedUser.profile_picture) || ''}
+                    alt={selectedUser.username}
+                    className="w-10 h-10 rounded-full object-cover"
+                  />
+                ) : (
+                  <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-full flex items-center justify-center text-white font-bold">
+                    {selectedUser.username[0].toUpperCase()}
+                  </div>
+                )}
                 <div
                   className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 ${isDarkMode ? 'border-gray-800' : 'border-white'} ${
                     selectedUser.is_online ? 'bg-green-500' : 'bg-gray-400'
                   }`}
                 />
               </div>
-              <div>
+              <div className="flex-1">
                 <h2 className={`font-semibold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>{selectedUser.username}</h2>
                 <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                  {selectedUser.is_online ? 'Online' : 'Offline'}
+                  {selectedUser.is_online ? (selectedUser.status_message || 'Online') : `Last seen ${formatLastSeen(selectedUser.last_seen)}`}
                 </p>
+                {selectedUser.bio && (
+                  <p className={`text-xs ${isDarkMode ? 'text-gray-500' : 'text-gray-400'} truncate`}>
+                    {selectedUser.bio}
+                  </p>
+                )}
               </div>
+              <button
+                onClick={() => toggleMute(selectedUser.id)}
+                className={`p-2 rounded-lg transition ${
+                  isDarkMode 
+                    ? 'hover:bg-gray-700 text-gray-300' 
+                    : 'hover:bg-gray-100 text-gray-600'
+                }`}
+                title={isMuted(selectedUser.id) ? 'Unmute notifications' : 'Mute notifications'}
+              >
+                <span className="text-2xl">
+                  {isMuted(selectedUser.id) ? '🔕' : '🔔'}
+                </span>
+              </button>
             </div>
 
             {/* Messages */}
@@ -435,7 +686,7 @@ export default function Chat() {
                         {/* Reaction Button */}
                         <button
                           onClick={() => setShowReactionPicker(showReactionPicker === msg.id ? null : msg.id)}
-                          className="absolute -bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity bg-white border border-gray-300 rounded-full p-1 hover:bg-gray-50 text-sm"
+                          className={`absolute -bottom-2 ${isOwn ? 'left-2' : 'right-2'} opacity-0 group-hover:opacity-100 transition-opacity bg-white border border-gray-300 rounded-full p-1 hover:bg-gray-50 text-sm`}
                           title="Add reaction"
                         >
                           😊
@@ -443,7 +694,7 @@ export default function Chat() {
 
                         {/* Reaction Picker */}
                         {showReactionPicker === msg.id && (
-                          <div className="absolute bottom-8 right-0">
+                          <div className={`absolute bottom-full mb-2 ${isOwn ? 'right-0' : 'left-0'}`}>
                             <ReactionPicker
                               onReactionSelect={(emoji) => handleReaction(msg.id, emoji)}
                               show={true}
@@ -516,6 +767,24 @@ export default function Chat() {
           </div>
         )}
       </div>
+
+      {/* Profile Picture Upload Modal */}
+      {showProfileUpload && (
+        <ProfilePictureUpload
+          currentPicture={getProfilePictureUrl(user?.profile_picture) || undefined}
+          onUploadSuccess={handleProfilePictureUpdate}
+          onClose={() => setShowProfileUpload(false)}
+        />
+      )}
+
+      {/* Profile Settings Modal */}
+      {showProfileSettings && user && (
+        <ProfileSettingsModal
+          user={user}
+          onUpdate={handleProfileUpdate}
+          onClose={() => setShowProfileSettings(false)}
+        />
+      )}
     </div>
   )
 }

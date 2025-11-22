@@ -242,6 +242,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
         print(f"User {user.username} disconnected")
         manager.disconnect(user.id)
         user.is_online = False
+        user.last_seen = datetime.utcnow()
         db.commit()
         
         # Broadcast user offline status
@@ -253,4 +254,5 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
         traceback.print_exc()
         manager.disconnect(user.id)
         user.is_online = False
+        user.last_seen = datetime.utcnow()
         db.commit()
